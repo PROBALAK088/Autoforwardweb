@@ -19,7 +19,10 @@ import {
   Activity,
   Server,
   LogOut,
-  Terminal
+  Terminal,
+  Check,
+  XCircle,
+  Clock
 } from 'lucide-react';
 import { Toggle } from './components/Toggle';
 import { SectionHeader } from './components/SectionHeader';
@@ -59,17 +62,16 @@ const App: React.FC = () => {
   const [job, setJob] = useState<ForwardJob>(initialJobState);
   const [showJobWizard, setShowJobWizard] = useState(false);
   const [wizardStep, setWizardStep] = useState(1);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logs, setLogs] = useState<{msg: string, type: 'info'|'success'|'error'|'warn'}[]>([]);
+  const logsEndRef = useRef<HTMLDivElement>(null);
   
   // Ref to handle cancellation
   const abortRef = useRef<boolean>(false);
 
   useEffect(() => {
-    // Check for logged in user
     const user = getCurrentUser();
     if (user) {
       setCurrentUser(user);
-      // Load config only if user exists
       loadConfigFromDB().then((data) => {
         setConfig(data);
         setLoading(false);
@@ -78,6 +80,13 @@ const App: React.FC = () => {
       setLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    // Auto-scroll logs
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs]);
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
@@ -194,14 +203,14 @@ const App: React.FC = () => {
     }));
   };
 
-  const addLog = (msg: string) => {
-    const time = new Date().toLocaleTimeString();
-    setLogs(prev => [`[${time}] ${msg}`, ...prev].slice(0, 50));
+  const addLog = (msg: string, type: 'info'|'success'|'error'|'warn' = 'info') => {
+    const time = new Date().toLocaleTimeString([], {hour12: false});
+    setLogs(prev => [...prev, {msg: `[${time}] ${msg}`, type}].slice(-100));
   };
 
   const stopJob = () => {
     abortRef.current = true;
-    addLog("🛑 Stopping forwarding job...");
+    addLog("🛑 Stopping forwarding job...", 'warn');
     setJob(prev => ({ ...prev, status: 'PAUSED' }));
   };
 
@@ -214,14 +223,12 @@ const App: React.FC = () => {
     abortRef.current = false;
     setLogs([]);
     
-    // Calculate Range
     let startId = 1;
     let endId = job.lastMessageId;
 
     if (job.skipCount > 0) {
-        startId = job.skipCount; // User wants to start from X
+        startId = job.skipCount;
     } else if (job.skipCount < 0) {
-        // User wants to skip last X (e.g. start = 5000 - 100 = 4900)
         startId = Math.max(1, endId + job.skipCount);
     }
 
@@ -232,32 +239,24 @@ const App: React.FC = () => {
     }
 
     setJob(prev => ({ ...prev, status: 'RUNNING', progress: 0, processedCount: 0, totalMessages: total }));
-    addLog(`🚀 Starting job: ID ${startId} to ${endId} (${total} msgs)`);
+    addLog(`🚀 Starting job: ID ${startId} to ${endId} (${total} msgs)`, 'info');
     
     let processed = 0;
     let consecutiveErrors = 0;
 
     for (let msgId = startId; msgId <= endId; msgId++) {
         if (abortRef.current) {
-          addLog("⛔ Job aborted by user.");
+          addLog("⛔ Job aborted by user.", 'error');
           break;
         }
 
         try {
-          // 1. Prepare Caption 
-          // Since we can't get original text easily via Bot API without complex forward/delete logic,
-          // We will rely on the 'template' if it exists, or pass undefined to keep original.
           let finalCaption = undefined;
           
-          // If user has defined a template OR wants to clean the caption,
-          // we generate a new caption. Since we lack original, we might use placeholders only.
           if (config.captionRules.template || config.captionRules.prefix || config.captionRules.suffix) {
              finalCaption = processCaption("", `file_${msgId}`, 0, config.captionRules);
-             // Note: This assumes we overwrite with template. 
-             // For true 'cleaning', we'd need the original text which is hard to get via API only.
           }
 
-          // 2. Forward (Copy)
           const result = await copyMessage(
             job.destinationId, 
             job.sourceId, 
@@ -267,27 +266,34 @@ const App: React.FC = () => {
           );
           
           if (result.success) {
-            addLog(`✅ Copied message ${msgId} ${finalCaption ? '(Caption Modified)' : ''}`);
+            addLog(`✅ Copied message ${msgId}`, 'success');
             consecutiveErrors = 0;
           } else if (result.retryAfter) {
-            addLog(`⏳ Rate limit hit! Sleeping for ${result.retryAfter}s...`);
+            addLog(`⏳ Rate limit hit! Sleeping for ${result.retryAfter}s...`, 'warn');
             await new Promise(r => setTimeout(r, (result.retryAfter! * 1000) + 100));
             msgId--; // Retry
             continue; 
           } else {
-            // Silent fail for deleted messages to reduce noise, unless verbose
-            if (!result.error?.includes('not found') && !result.error?.includes('deleted')) {
-               addLog(`⚠️ Error on ${msgId}: ${result.error}`);
+            // Smart Error Handling
+            const errorLower = result.error?.toLowerCase() || "";
+            
+            // If message not found or empty, it's safe to skip
+            if (errorLower.includes('message to copy not found') || errorLower.includes('message is empty') || result.errorCode === 400) {
+               addLog(`⏩ Skipped ${msgId} (Not found/Empty)`, 'info');
+               consecutiveErrors = 0; // Don't pause for missing messages
+            } else {
+               addLog(`⚠️ Error on ${msgId}: ${result.error}`, 'error');
+               consecutiveErrors++;
             }
-            consecutiveErrors++;
           }
         } catch (e) {
-          addLog(`❌ Network Exception on ${msgId}`);
+          addLog(`❌ System Exception on ${msgId}`, 'error');
           consecutiveErrors++;
         }
 
-        if (consecutiveErrors > 50) {
-          addLog("⚠️ Too many consecutive errors. Pausing job.");
+        // Safety break if too many REAL errors (not just skips)
+        if (consecutiveErrors > 20) {
+          addLog("⚠️ Too many connection errors. Pausing job to protect bot.", 'error');
           abortRef.current = true;
           break;
         }
@@ -301,15 +307,14 @@ const App: React.FC = () => {
           processedCount: processed
         }));
 
-        // Minimal delay to avoid flooding proxy/api
-        await new Promise(r => setTimeout(r, 50)); 
+        // Dynamic delay
+        await new Promise(r => setTimeout(r, 80)); 
     }
 
     setJob(prev => ({ ...prev, status: abortRef.current ? 'PAUSED' : 'COMPLETED' }));
-    if (!abortRef.current) addLog("🏁 Job Completed Successfully.");
+    if (!abortRef.current) addLog("🏁 Job Completed Successfully.", 'success');
   };
 
-  // Loading State
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-telegram-dark text-white relative overflow-hidden">
@@ -324,7 +329,6 @@ const App: React.FC = () => {
     );
   }
 
-  // Auth Guard
   if (!currentUser) {
     return (
       <>
@@ -344,7 +348,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen text-white pb-20 font-sans relative z-10">
       {/* Navbar */}
-      <nav className="glass-panel border-b border-white/5 sticky top-0 z-50 px-6 py-3 flex justify-between items-center shadow-lg mb-6">
+      <nav className="glass-panel border-b border-white/5 sticky top-0 z-50 px-6 py-3 flex justify-between items-center shadow-lg mb-6 backdrop-blur-xl">
         <div className="flex items-center gap-4">
           <div className="w-10 h-10 bg-gradient-to-tr from-telegram-primary to-blue-400 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20">
             <Send className="text-white" fill="white" size={20} />
@@ -394,17 +398,15 @@ const App: React.FC = () => {
         
         <div className="grid lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
-            {/* Bot Connection Section */}
             <BotConnection 
               config={config.bot} 
               onUpdate={(newBotConfig) => updateConfig(prev => ({ ...prev, bot: newBotConfig }))}
             />
 
-             {/* Forwarding Job Wizard */}
-            <section className="relative overflow-hidden rounded-2xl p-0.5 bg-gradient-to-br from-blue-500/20 to-purple-500/20 shadow-2xl">
-              <div className="bg-telegram-surface/90 p-6 rounded-2xl backdrop-blur-sm relative z-10 h-full">
+            <section className="relative overflow-hidden rounded-2xl p-0.5 bg-gradient-to-br from-blue-500/30 to-purple-500/30 shadow-2xl">
+              <div className="bg-telegram-surface/95 p-6 rounded-2xl backdrop-blur-md relative z-10 h-full">
                 <div className="flex justify-between items-start mb-6">
-                  <SectionHeader title="Forwarding Operations" icon={Zap} description="Bulk forward messages between channels." />
+                  <SectionHeader title="Forwarding Engine" icon={Zap} description="High-performance bulk forwarding." />
                   {!showJobWizard && job.status === 'IDLE' && (
                     <button 
                       onClick={() => { setShowJobWizard(true); setWizardStep(1); }}
@@ -416,71 +418,74 @@ const App: React.FC = () => {
                   )}
                 </div>
 
-                {/* Status: Running or Completed */}
                 {(job.status === 'RUNNING' || job.status === 'PAUSED' || job.status === 'COMPLETED') && (
-                  <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700/50 space-y-4">
+                  <div className="bg-slate-900/80 rounded-xl p-6 border border-slate-700/50 space-y-4 shadow-inner">
                     <div className="flex justify-between items-end mb-2">
                       <div className="flex flex-col">
                         <span className={`font-bold text-lg flex items-center gap-2 ${job.status === 'RUNNING' ? 'text-telegram-accent animate-pulse' : job.status === 'COMPLETED' ? 'text-green-400' : 'text-yellow-400'}`}>
-                          {job.status === 'RUNNING' && 'Processing...'}
-                          {job.status === 'COMPLETED' && 'Completed'}
-                          {job.status === 'PAUSED' && 'Stopped'}
+                          {job.status === 'RUNNING' && <><Activity size={16}/> Processing...</>}
+                          {job.status === 'COMPLETED' && <><Check size={16}/> Completed</>}
+                          {job.status === 'PAUSED' && <><Clock size={16}/> Stopped</>}
                         </span>
-                        <span className="text-xs text-slate-500">Forwarding messages {job.processedCount} / {job.totalMessages}</span>
+                        <span className="text-xs text-slate-500">Processed {job.processedCount} of {job.totalMessages} messages</span>
                       </div>
-                      <span className="text-2xl font-mono font-bold text-white">{job.progress}%</span>
+                      <span className="text-2xl font-mono font-bold text-white tracking-tighter">{job.progress}%</span>
                     </div>
                     
-                    <div className="w-full h-4 bg-slate-950 rounded-full overflow-hidden border border-slate-700">
+                    <div className="w-full h-3 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
                       <div 
-                        className={`h-full transition-all duration-300 ${job.status === 'COMPLETED' ? 'bg-green-500' : 'bg-gradient-to-r from-telegram-primary to-purple-500'}`} 
+                        className={`h-full transition-all duration-300 ${job.status === 'COMPLETED' ? 'bg-green-500 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'bg-gradient-to-r from-telegram-primary to-purple-500 shadow-[0_0_15px_rgba(51,144,236,0.5)]'}`} 
                         style={{width: `${job.progress}%`}}
                       ></div>
                     </div>
 
-                    {/* LOG CONSOLE */}
-                    <div className="bg-slate-950 rounded-lg border border-slate-800 p-3 h-40 overflow-y-auto custom-scrollbar font-mono text-xs space-y-1">
-                       {logs.length === 0 && <span className="text-slate-600 italic">Waiting for logs...</span>}
+                    {/* MATRIX LOG CONSOLE */}
+                    <div className="bg-black rounded-lg border border-slate-800 p-4 h-48 overflow-y-auto custom-scrollbar font-mono text-xs shadow-inner">
+                       {logs.length === 0 && <span className="text-slate-700 italic">Initializing forwarder sequence...</span>}
                        {logs.map((log, i) => (
-                         <div key={i} className="text-slate-300 border-b border-slate-900/50 pb-0.5 last:border-0">
-                           {log}
+                         <div key={i} className={`pb-1 flex items-start gap-2 ${
+                           log.type === 'error' ? 'text-red-400' : 
+                           log.type === 'warn' ? 'text-yellow-400' : 
+                           log.type === 'success' ? 'text-green-400' : 'text-slate-400'
+                         }`}>
+                           <span className="opacity-50 min-w-[60px]">{log.msg.split(']')[0]}]</span>
+                           <span>{log.msg.split(']')[1]}</span>
                          </div>
                        ))}
+                       <div ref={logsEndRef} />
                     </div>
 
                     <div className="flex gap-4 justify-end pt-2">
                       {job.status === 'RUNNING' && (
                         <button 
                           onClick={stopJob}
-                          className="text-red-400 hover:bg-red-500/10 px-4 py-2 rounded-md text-sm transition-colors border border-transparent hover:border-red-500/20"
+                          className="text-red-400 hover:bg-red-500/10 px-4 py-2 rounded-md text-sm transition-colors border border-red-500/20 hover:border-red-500/40 flex items-center gap-2"
                         >
-                          Stop Operation
+                          <XCircle size={16} /> Stop Operation
                         </button>
                       )}
                       {job.status !== 'RUNNING' && (
                          <button 
                           onClick={() => setJob(prev => ({...prev, status: 'IDLE', progress: 0, processedCount: 0}))}
-                          className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm"
+                          className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2"
                         >
-                          New Task
+                          <Plus size={16} /> New Task
                         </button>
                       )}
                     </div>
                   </div>
                 )}
 
-                {/* Wizard Form */}
                 {showJobWizard && job.status === 'IDLE' && (
                   <div className="space-y-6 bg-slate-800/40 p-6 rounded-xl border border-slate-700/50 animate-in fade-in slide-in-from-bottom-4 duration-300">
                     
-                    {/* Wizard Step 1: Channels */}
                     {wizardStep === 1 && (
                       <div className="space-y-4">
                         <h3 className="text-lg font-medium text-white">Step 1: Select Channels</h3>
                         <div className="grid md:grid-cols-2 gap-4">
                           <div>
                             <label className="block text-xs text-slate-400 mb-1 uppercase font-bold tracking-wider">Source</label>
-                            <div className="grid gap-2">
+                            <div className="grid gap-2 max-h-40 overflow-y-auto custom-scrollbar">
                               {config.channels.filter(c => c.type === ChannelType.SOURCE).map(c => (
                                 <button
                                   key={c.id}
@@ -495,7 +500,7 @@ const App: React.FC = () => {
                           </div>
                           <div>
                             <label className="block text-xs text-slate-400 mb-1 uppercase font-bold tracking-wider">Destination</label>
-                            <div className="grid gap-2">
+                            <div className="grid gap-2 max-h-40 overflow-y-auto custom-scrollbar">
                               {config.channels.filter(c => c.type === ChannelType.DESTINATION).map(c => (
                                 <button
                                   key={c.id}
@@ -522,7 +527,6 @@ const App: React.FC = () => {
                       </div>
                     )}
 
-                    {/* Wizard Step 2: Range & Skip */}
                     {wizardStep === 2 && (
                       <div className="space-y-6">
                         <h3 className="text-lg font-medium text-white">Step 2: Range & Filters</h3>
@@ -532,7 +536,7 @@ const App: React.FC = () => {
                           <div className="flex items-center gap-3">
                               <input 
                                 type="number" 
-                                className="flex-1 bg-slate-950/80 border border-slate-600 rounded-lg p-3 text-lg font-mono focus:border-telegram-primary outline-none"
+                                className="flex-1 bg-slate-950/80 border border-slate-600 rounded-lg p-3 text-lg font-mono focus:border-telegram-primary outline-none text-white"
                                 placeholder="e.g. 5000"
                                 onChange={(e) => setJob(prev => ({...prev, lastMessageId: parseInt(e.target.value)}))}
                               />
@@ -550,15 +554,15 @@ const App: React.FC = () => {
                           </p>
                           <div className="grid grid-cols-4 gap-3 mb-4">
                               {[
-                                { label: 'Start from ID 300', val: 300 },
-                                { label: 'Last 100 Msgs', val: -100 },
-                                { label: 'Start from ID 10', val: 10 },
-                                { label: 'Last 10 Msgs', val: -10 }
+                                { label: 'Start 300', val: 300 },
+                                { label: 'Last 100', val: -100 },
+                                { label: 'Start 10', val: 10 },
+                                { label: 'Last 10', val: -10 }
                               ].map(opt => (
                                 <button 
                                   key={opt.val}
                                   onClick={() => setJob(prev => ({...prev, skipCount: opt.val}))}
-                                  className={`px-2 py-3 text-xs font-medium rounded-lg border transition-all ${job.skipCount === opt.val ? 'bg-orange-500 text-white border-orange-500 shadow-lg shadow-orange-500/20' : 'bg-slate-900 border-slate-600 text-slate-400 hover:bg-slate-800'}`}
+                                  className={`px-2 py-2 text-xs font-medium rounded-lg border transition-all ${job.skipCount === opt.val ? 'bg-orange-500 text-white border-orange-500 shadow-lg shadow-orange-500/20' : 'bg-slate-900 border-slate-600 text-slate-400 hover:bg-slate-800'}`}
                                 >
                                   {opt.label}
                                 </button>
@@ -568,8 +572,8 @@ const App: React.FC = () => {
                               type="number"
                               value={job.skipCount}
                               onChange={(e) => setJob(prev => ({...prev, skipCount: parseInt(e.target.value)}))}
-                              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm font-mono text-center"
-                              placeholder="Custom Value"
+                              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm font-mono text-center text-white"
+                              placeholder="Custom Start Value"
                           />
                         </div>
 
@@ -593,10 +597,8 @@ const App: React.FC = () => {
           </div>
 
           <div className="space-y-6">
-             {/* Command Reference */}
              <BotCommands />
 
-             {/* Connections */}
              <section className="glass-panel rounded-2xl p-6 shadow-xl">
               <SectionHeader 
                 title="Channel Manager" 
@@ -619,7 +621,7 @@ const App: React.FC = () => {
                       disabled={!config.bot.isConnected}
                       onChange={(e) => setNewChannelId(e.target.value)}
                       placeholder="-100xxxxxxxxxx"
-                      className="w-full bg-slate-950 border border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:border-telegram-primary outline-none disabled:opacity-50 font-mono text-center tracking-wide"
+                      className="w-full bg-slate-950 border border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:border-telegram-primary outline-none disabled:opacity-50 font-mono text-center tracking-wide text-white"
                     />
                     
                     <div className="flex gap-2">
@@ -647,7 +649,6 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Connected List */}
                 <div className="space-y-2 max-h-[200px] overflow-y-auto pr-1 custom-scrollbar">
                   {config.channels.length === 0 && (
                     <p className="text-center text-slate-500 text-xs py-4 italic">No channels connected</p>
@@ -674,7 +675,6 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Advanced Caption Settings */}
         <section className="glass-panel rounded-2xl p-1 shadow-xl">
           <div className="p-6 pb-2">
             <SectionHeader title="Advanced Caption Editor" icon={FileText} description="Configure templates, replacements, and metadata extraction." />
@@ -686,7 +686,6 @@ const App: React.FC = () => {
         </section>
 
         <div className="grid md:grid-cols-2 gap-8">
-          {/* File Type Toggles */}
           <section className="glass-panel rounded-2xl p-6 shadow-xl h-full">
             <SectionHeader title="Content Filters" icon={Settings} description="Toggle specific message types." />
             <div className="space-y-1">
@@ -723,7 +722,6 @@ const App: React.FC = () => {
             </div>
           </section>
 
-          {/* Size Limits */}
           <section className="glass-panel rounded-2xl p-6 shadow-xl flex flex-col">
              <SectionHeader title="File Size Limits" icon={HardDrive} description="Control bandwidth usage by limiting file sizes." />
              <div className="flex-1 flex flex-col justify-center space-y-8 mt-2">
@@ -768,12 +766,10 @@ const App: React.FC = () => {
           </section>
         </div>
 
-        {/* Basic Cleaners & Blacklist */}
         <section className="glass-panel rounded-2xl p-6 shadow-xl">
           <SectionHeader title="Quick Filters & Blacklist" icon={Scissors} description="Sanitize message text and block content." />
           
           <div className="grid lg:grid-cols-3 gap-8 mt-6">
-            {/* Remove Words */}
             <div className="space-y-4">
                <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-2">Remove Words</h3>
                <div className="bg-slate-800/80 p-4 rounded-xl border border-slate-700/50">
@@ -783,7 +779,7 @@ const App: React.FC = () => {
                     value={newWord}
                     onChange={(e) => setNewWord(e.target.value)}
                     placeholder="e.g. @spam_channel"
-                    className="flex-1 bg-slate-950 border border-slate-600 rounded-lg px-4 py-2.5 text-sm focus:border-telegram-primary outline-none"
+                    className="flex-1 bg-slate-950 border border-slate-600 rounded-lg px-4 py-2.5 text-sm focus:border-telegram-primary outline-none text-white"
                     onKeyDown={(e) => e.key === 'Enter' && addRemoveWord()}
                   />
                   <button onClick={addRemoveWord} className="bg-slate-700 hover:bg-slate-600 text-white px-4 rounded-lg transition-colors">Add</button>
@@ -799,7 +795,6 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            {/* Blacklist Words */}
             <div className="space-y-4">
               <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-2 flex items-center gap-2"><ShieldAlert size={14}/> Blacklist Phrases</h3>
               <div className="bg-red-900/10 p-4 rounded-xl border border-red-500/20">
@@ -809,7 +804,7 @@ const App: React.FC = () => {
                     value={newBlacklistPhrase}
                     onChange={(e) => setNewBlacklistPhrase(e.target.value)}
                     placeholder="Skip message if contains..."
-                    className="flex-1 bg-slate-950 border border-red-900/40 rounded-lg px-4 py-2.5 text-sm focus:border-red-500 outline-none"
+                    className="flex-1 bg-slate-950 border border-red-900/40 rounded-lg px-4 py-2.5 text-sm focus:border-red-500 outline-none text-white"
                     onKeyDown={(e) => e.key === 'Enter' && addBlacklistPhrase()}
                   />
                   <button onClick={addBlacklistPhrase} className="bg-red-900/40 hover:bg-red-800/40 text-red-200 px-4 rounded-lg transition-colors">Add</button>
@@ -825,7 +820,6 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            {/* Quick Toggles */}
             <div className="space-y-1 border-l border-slate-700/50 pl-0 lg:pl-6">
               <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-4">Basic Toggles</h3>
               <Toggle 
@@ -863,7 +857,6 @@ const App: React.FC = () => {
         </section>
       </main>
       
-      {/* Watermark */}
       <div className="fixed bottom-4 right-6 z-50 pointer-events-none">
         <div className="glass-panel px-4 py-2 rounded-full flex items-center gap-2 shadow-lg border-telegram-primary/30">
            <div className="w-2 h-2 bg-telegram-accent rounded-full animate-pulse shadow-[0_0_8px_#00dcff]"></div>

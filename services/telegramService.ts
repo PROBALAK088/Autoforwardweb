@@ -2,12 +2,12 @@
 import { BotConfig, Channel, TelegramMessage } from '../types';
 
 // CORS Proxy to bypass browser restrictions when calling Telegram API
+// We use corsproxy.io as it supports POST requests reasonably well.
 const PROXY_URL = 'https://corsproxy.io/?';
 const TELEGRAM_API_BASE = 'https://api.telegram.org/bot';
 
 const getApiUrl = (token: string, method: string, params = '') => {
   const url = `${TELEGRAM_API_BASE}${token}/${method}${params ? '?' + params : ''}`;
-  // Wrap with proxy
   return `${PROXY_URL}${encodeURIComponent(url)}`;
 };
 
@@ -29,7 +29,8 @@ export const checkBotStatus = async (token: string): Promise<Partial<BotConfig> 
     return null;
   } catch (error) {
     console.error("Telegram API Connection Error:", error);
-    throw new Error("Failed to connect to Telegram API (Check Proxy/Network)");
+    // Don't throw, just return null so UI shows error state gracefully
+    return null;
   }
 };
 
@@ -78,54 +79,13 @@ export const verifyBotAdmin = async (channelId: string, botToken: string, botId?
   }
 };
 
-/**
- * Fetches a specific message to inspect its content (caption, filename, etc.)
- */
 export const getMessage = async (
   chatId: string,
   messageId: number,
   botToken: string
 ): Promise<TelegramMessage | null> => {
-  // Note: getMessage is not a standard Bot API method (it doesn't exist directly).
-  // We usually forward it to the bot itself or copy it to inspect, but that spams.
-  // However, for this tool, we will use 'copyMessage' to a dummy target or try to assume content.
-  
-  // WORKAROUND: Since we cannot 'get' a message content without being an admin and reading history (which the API doesn't allow easily for specific IDs),
-  // we will assume the operation flow is: 
-  // 1. Copy raw to get structure? No, copy returns ID.
-  
-  // ACTUAL SOLUTION: We can't strictly "GET" a message by ID via Bot API unless we forward it.
-  // However, if the user provided a bot token, we can try `forwardMessage` to the bot's private chat with the user (if we knew the user ID).
-  // Since we don't, we will have to skip "Get Message" and rely on blind copying for basic forwarding, 
-  // OR we rely on the fact that `copyMessage` allows setting a new caption BLINDLY.
-  
-  // WAIT: If we want to REMOVE words from an existing caption, we MUST know the existing caption.
-  // There is NO way to get the existing caption via Bot API without receiving a Webhook or Update.
-  // BUT, for a forwarding tool, we are acting blindly on IDs.
-  
-  // ALTERNATIVE: We cannot implement "Clean Caption" on historical messages using ONLY Bot API + Message ID.
-  // We would need MTProto (Userbot) for that.
-  // But I must provide a solution.
-  
-  // HYBRID SOLUTION: We will simulate success for the 'Get' and warn the user in the UI 
-  // that "Caption Cleaning requires the bot to have seen the message" - actually that's not true.
-  
-  // REALITY CHECK: You cannot get message text/caption by ID using Bot API.
-  // You can only 'forwardMessage'. 
-  // If we 'forwardMessage' to the Target, it retains the original caption (and "Forwarded from" tag).
-  // If we 'copyMessage' to the Target, we can SET a new caption, but we don't know the old one.
-  
-  // IMPOSSIBLE FEATURE FIX: To "Clean" a caption, we need the old caption.
-  // Since we can't get it, we will assume the user wants to use the TEMPLATE completely 
-  // OR we simply use `copyMessage` without caption change if no template is active.
-  
-  // However, for the sake of this "Advanced Code" request, I will implement a mock fetch 
-  // that returns null, and in App.tsx we will handle this limitation.
-  // Actually, there is one way: Forward message to the bot itself (getMe), read the update, then delete it.
-  // This is too complex for a frontend-only app.
-  
-  // FOR NOW: We will return NULL. The App.tsx will handle this by just copying the file. 
-  // IF the user wants to apply a template, they can, but it will overwrite the old caption completely.
+  // Limitation: Standard Bot API cannot "get" a message by ID directly without Webhooks.
+  // Returning null to signal that we must rely on blind copying or user-provided templates.
   return null;
 };
 
@@ -133,6 +93,7 @@ interface CopyMessageResult {
   success: boolean;
   retryAfter?: number;
   error?: string;
+  errorCode?: number;
   messageId?: number;
 }
 
@@ -167,20 +128,35 @@ export const copyMessage = async (
       body: JSON.stringify(body)
     });
     
+    // Handle Proxy Errors (HTML response instead of JSON)
+    const contentType = response.headers.get("content-type");
+    if (contentType && contentType.indexOf("application/json") === -1) {
+        const text = await response.text();
+        console.error("Proxy Error:", text);
+        return { success: false, error: "CORS Proxy Error (Try refreshing)" };
+    }
+
     const data = await response.json();
 
     if (data.ok) {
       return { success: true, messageId: data.result.message_id };
     }
 
+    // Handle Rate Limits
     if (data.error_code === 429) {
       const retryAfter = data.parameters?.retry_after || 5;
       return { success: false, retryAfter };
     }
 
-    return { success: false, error: data.description };
-  } catch (error) {
-    console.error("Copy Message Error:", error);
-    return { success: false, error: "Network/API Error" };
+    // Return specific Telegram error description
+    return { 
+        success: false, 
+        error: data.description || "Unknown API Error", 
+        errorCode: data.error_code 
+    };
+
+  } catch (error: any) {
+    console.error("Copy Message Network Error:", error);
+    return { success: false, error: error.message || "Network Connection Failed" };
   }
 };
