@@ -1,35 +1,48 @@
 
-export enum ChannelType {
-  SOURCE = 'SOURCE',
-  DESTINATION = 'DESTINATION'
+export interface OttData {
+  title: string;
+  poster: string;
+  year?: string;
+  ott?: string;
+  landscape?: string;
 }
 
-export interface User {
-  username: string;
-  telegramId: string;
+export interface HistoryItem extends OttData {
+  id: string;
+  timestamp: number;
+  originalUrl: string;
+}
+
+export interface ApiError {
+  error: boolean;
+  message: string;
+}
+
+export interface BotConfig {
+  token: string;
+  id?: number;
+  name?: string;
+  username?: string;
+  isConnected: boolean;
 }
 
 export interface Channel {
   id: string;
   name: string;
-  type: ChannelType;
   connectedAt: Date;
 }
 
-export interface FileSizeLimit {
-  min: number; // in MB
-  max: number; // in MB
-}
-
-export interface ContentFilters {
-  video: boolean;
-  document: boolean;
-  text: boolean;
-  stickers: boolean;
-  photos: boolean;
-  audio: boolean;
-  voice: boolean;
-  animation: boolean; // GIFs
+export interface TelegramMessage {
+  message_id: number;
+  chat: {
+    id: number;
+    title?: string;
+    username?: string;
+    type: string;
+  };
+  date: number;
+  text?: string;
+  caption?: string;
 }
 
 export interface ReplacementRule {
@@ -38,66 +51,31 @@ export interface ReplacementRule {
 }
 
 export interface CaptionRules {
-  removeWords: string[];
+  template: string;
   removeLinks: boolean;
   removeUsernames: boolean;
   removeEmojis: boolean;
-  singleLineSpace: boolean;
-  
-  // Advanced Features
-  template: string;
+  removeWords: string[];
+  replacements: ReplacementRule[];
+  symbolsToRemove: string;
+  symbolsToReplace: string;
   prefix: string;
   suffix: string;
-  replacements: ReplacementRule[];
+  singleLineSpace: boolean;
   customLanguages: string[];
   customQualities: string[];
   protectedWords: string[];
-  symbolsToRemove: string;
-  symbolsToReplace: string;
-  fixExtension: boolean;
-  buttons: string; // Stored as string representation for easier editing (e.g., [Text](url))
-}
-
-export interface BotConfig {
-  id?: number;
-  token: string;
-  name: string;
-  username: string;
-  isConnected: boolean;
+  buttons: string;
 }
 
 export interface AppConfig {
   bot: BotConfig;
   channels: Channel[];
-  filters: ContentFilters;
   captionRules: CaptionRules;
-  sizeLimits: FileSizeLimit;
-  blacklistPhrases: string[];
 }
 
-export interface ForwardJob {
+export interface User {
   id: string;
-  sourceId: string;
-  destinationId: string;
-  lastMessageId: number;
-  skipCount: number; // Positive to skip start, negative to skip end
-  progress: number;
-  status: 'IDLE' | 'RUNNING' | 'COMPLETED' | 'PAUSED';
-  totalMessages: number;
-  processedCount: number;
-}
-
-// Telegram API Types
-export interface TelegramMessage {
-  message_id: number;
-  chat: {
-    id: number;
-    title?: string;
-  };
-  caption?: string;
-  text?: string; // For text-only messages
-  video?: { file_name?: string; file_size?: number; mime_type?: string };
-  document?: { file_name?: string; file_size?: number; mime_type?: string };
-  audio?: { file_name?: string; file_size?: number; mime_type?: string };
-  photo?: any[];
+  username: string;
+  telegramId: string;
 }

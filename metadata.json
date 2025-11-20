@@ -1,5 +1,5 @@
 {
-  "name": "AutoGram Forwarder",
-  "description": "A comprehensive dashboard to manage Telegram channel auto-forwarding rules, caption cleaning, file limits, and bulk forwarding jobs.",
+  "name": "OTT Poster Extractor",
+  "description": "Extract high-quality movie and series posters from various OTT platforms using specialized APIs.",
   "requestFramePermissions": []
 }
