@@ -1,0 +1,5 @@
+{
+  "name": "AutoGram Forwarder",
+  "description": "A comprehensive dashboard to manage Telegram channel auto-forwarding rules, caption cleaning, file limits, and bulk forwarding jobs.",
+  "requestFramePermissions": []
+}
