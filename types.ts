@@ -86,3 +86,18 @@ export interface ForwardJob {
   totalMessages: number;
   processedCount: number;
 }
+
+// Telegram API Types
+export interface TelegramMessage {
+  message_id: number;
+  chat: {
+    id: number;
+    title?: string;
+  };
+  caption?: string;
+  text?: string; // For text-only messages
+  video?: { file_name?: string; file_size?: number; mime_type?: string };
+  document?: { file_name?: string; file_size?: number; mime_type?: string };
+  audio?: { file_name?: string; file_size?: number; mime_type?: string };
+  photo?: any[];
+}

@@ -1,5 +1,5 @@
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { 
   Settings, 
   FileText, 
@@ -18,7 +18,8 @@ import {
   ShieldAlert,
   Activity,
   Server,
-  LogOut
+  LogOut,
+  Terminal
 } from 'lucide-react';
 import { Toggle } from './components/Toggle';
 import { SectionHeader } from './components/SectionHeader';
@@ -27,7 +28,8 @@ import { BotCommands } from './components/BotCommands';
 import { AdvancedSettings } from './components/AdvancedSettings';
 import { Auth } from './components/Auth';
 import { saveConfigToDB, loadConfigFromDB, testDatabaseConnection, getCurrentUser, logoutUser } from './services/mongoService';
-import { verifyBotAdmin } from './services/telegramService';
+import { verifyBotAdmin, copyMessage } from './services/telegramService';
+import { processCaption } from './services/captionService';
 import { AppConfig, ChannelType, ForwardJob, User } from './types';
 
 const initialJobState: ForwardJob = {
@@ -57,6 +59,10 @@ const App: React.FC = () => {
   const [job, setJob] = useState<ForwardJob>(initialJobState);
   const [showJobWizard, setShowJobWizard] = useState(false);
   const [wizardStep, setWizardStep] = useState(1);
+  const [logs, setLogs] = useState<string[]>([]);
+  
+  // Ref to handle cancellation
+  const abortRef = useRef<boolean>(false);
 
   useEffect(() => {
     // Check for logged in user
@@ -188,22 +194,119 @@ const App: React.FC = () => {
     }));
   };
 
-  const startForwarding = () => {
-    setJob(prev => ({ ...prev, status: 'RUNNING', progress: 0, processedCount: 0 }));
-    const total = 100; 
-    const interval = setInterval(() => {
-      setJob(prev => {
-        if (prev.progress >= 100) {
-          clearInterval(interval);
-          return { ...prev, status: 'COMPLETED', progress: 100, processedCount: total };
+  const addLog = (msg: string) => {
+    const time = new Date().toLocaleTimeString();
+    setLogs(prev => [`[${time}] ${msg}`, ...prev].slice(0, 50));
+  };
+
+  const stopJob = () => {
+    abortRef.current = true;
+    addLog("🛑 Stopping forwarding job...");
+    setJob(prev => ({ ...prev, status: 'PAUSED' }));
+  };
+
+  const startForwarding = async () => {
+    if (!config?.bot.isConnected || !job.sourceId || !job.destinationId) {
+      alert("Please ensure Bot is connected and channels are selected.");
+      return;
+    }
+
+    abortRef.current = false;
+    setLogs([]);
+    
+    // Calculate Range
+    let startId = 1;
+    let endId = job.lastMessageId;
+
+    if (job.skipCount > 0) {
+        startId = job.skipCount; // User wants to start from X
+    } else if (job.skipCount < 0) {
+        // User wants to skip last X (e.g. start = 5000 - 100 = 4900)
+        startId = Math.max(1, endId + job.skipCount);
+    }
+
+    const total = endId - startId + 1;
+    if (total <= 0) {
+        alert("Invalid range. Start ID is greater than End ID.");
+        return;
+    }
+
+    setJob(prev => ({ ...prev, status: 'RUNNING', progress: 0, processedCount: 0, totalMessages: total }));
+    addLog(`🚀 Starting job: ID ${startId} to ${endId} (${total} msgs)`);
+    
+    let processed = 0;
+    let consecutiveErrors = 0;
+
+    for (let msgId = startId; msgId <= endId; msgId++) {
+        if (abortRef.current) {
+          addLog("⛔ Job aborted by user.");
+          break;
         }
-        return { 
-          ...prev, 
-          progress: prev.progress + 1, 
-          processedCount: Math.floor((prev.progress + 1) / 100 * total) 
-        };
-      });
-    }, 100);
+
+        try {
+          // 1. Prepare Caption 
+          // Since we can't get original text easily via Bot API without complex forward/delete logic,
+          // We will rely on the 'template' if it exists, or pass undefined to keep original.
+          let finalCaption = undefined;
+          
+          // If user has defined a template OR wants to clean the caption,
+          // we generate a new caption. Since we lack original, we might use placeholders only.
+          if (config.captionRules.template || config.captionRules.prefix || config.captionRules.suffix) {
+             finalCaption = processCaption("", `file_${msgId}`, 0, config.captionRules);
+             // Note: This assumes we overwrite with template. 
+             // For true 'cleaning', we'd need the original text which is hard to get via API only.
+          }
+
+          // 2. Forward (Copy)
+          const result = await copyMessage(
+            job.destinationId, 
+            job.sourceId, 
+            msgId, 
+            config.bot.token,
+            finalCaption
+          );
+          
+          if (result.success) {
+            addLog(`✅ Copied message ${msgId} ${finalCaption ? '(Caption Modified)' : ''}`);
+            consecutiveErrors = 0;
+          } else if (result.retryAfter) {
+            addLog(`⏳ Rate limit hit! Sleeping for ${result.retryAfter}s...`);
+            await new Promise(r => setTimeout(r, (result.retryAfter! * 1000) + 100));
+            msgId--; // Retry
+            continue; 
+          } else {
+            // Silent fail for deleted messages to reduce noise, unless verbose
+            if (!result.error?.includes('not found') && !result.error?.includes('deleted')) {
+               addLog(`⚠️ Error on ${msgId}: ${result.error}`);
+            }
+            consecutiveErrors++;
+          }
+        } catch (e) {
+          addLog(`❌ Network Exception on ${msgId}`);
+          consecutiveErrors++;
+        }
+
+        if (consecutiveErrors > 50) {
+          addLog("⚠️ Too many consecutive errors. Pausing job.");
+          abortRef.current = true;
+          break;
+        }
+
+        processed++;
+        const progress = Math.floor((processed / total) * 100);
+        
+        setJob(prev => ({
+          ...prev,
+          progress,
+          processedCount: processed
+        }));
+
+        // Minimal delay to avoid flooding proxy/api
+        await new Promise(r => setTimeout(r, 50)); 
+    }
+
+    setJob(prev => ({ ...prev, status: abortRef.current ? 'PAUSED' : 'COMPLETED' }));
+    if (!abortRef.current) addLog("🏁 Job Completed Successfully.");
   };
 
   // Loading State
@@ -226,7 +329,6 @@ const App: React.FC = () => {
     return (
       <>
         <Auth onLogin={handleLogin} />
-        {/* Watermark on Auth Page */}
         <div className="fixed bottom-4 right-6 z-50 pointer-events-none">
           <div className="glass-panel px-4 py-2 rounded-full flex items-center gap-2 shadow-lg">
             <div className="w-2 h-2 bg-telegram-accent rounded-full animate-pulse"></div>
@@ -314,26 +416,55 @@ const App: React.FC = () => {
                   )}
                 </div>
 
-                {/* Status: Running */}
-                {job.status === 'RUNNING' && (
-                  <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700/50">
+                {/* Status: Running or Completed */}
+                {(job.status === 'RUNNING' || job.status === 'PAUSED' || job.status === 'COMPLETED') && (
+                  <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700/50 space-y-4">
                     <div className="flex justify-between items-end mb-2">
                       <div className="flex flex-col">
-                        <span className="text-telegram-accent font-bold text-lg animate-pulse">Processing...</span>
+                        <span className={`font-bold text-lg flex items-center gap-2 ${job.status === 'RUNNING' ? 'text-telegram-accent animate-pulse' : job.status === 'COMPLETED' ? 'text-green-400' : 'text-yellow-400'}`}>
+                          {job.status === 'RUNNING' && 'Processing...'}
+                          {job.status === 'COMPLETED' && 'Completed'}
+                          {job.status === 'PAUSED' && 'Stopped'}
+                        </span>
                         <span className="text-xs text-slate-500">Forwarding messages {job.processedCount} / {job.totalMessages}</span>
                       </div>
                       <span className="text-2xl font-mono font-bold text-white">{job.progress}%</span>
                     </div>
+                    
                     <div className="w-full h-4 bg-slate-950 rounded-full overflow-hidden border border-slate-700">
-                      <div className="h-full bg-gradient-to-r from-telegram-primary to-purple-500 transition-all duration-300 shadow-[0_0_15px_rgba(59,130,246,0.5)]" style={{width: `${job.progress}%`}}></div>
+                      <div 
+                        className={`h-full transition-all duration-300 ${job.status === 'COMPLETED' ? 'bg-green-500' : 'bg-gradient-to-r from-telegram-primary to-purple-500'}`} 
+                        style={{width: `${job.progress}%`}}
+                      ></div>
                     </div>
-                    <div className="flex gap-4 justify-end mt-6">
-                      <button 
-                        onClick={() => setJob(prev => ({...prev, status: 'IDLE', progress: 0}))}
-                        className="text-red-400 hover:bg-red-500/10 px-4 py-2 rounded-md text-sm transition-colors border border-transparent hover:border-red-500/20"
-                      >
-                        Abort Operation
-                      </button>
+
+                    {/* LOG CONSOLE */}
+                    <div className="bg-slate-950 rounded-lg border border-slate-800 p-3 h-40 overflow-y-auto custom-scrollbar font-mono text-xs space-y-1">
+                       {logs.length === 0 && <span className="text-slate-600 italic">Waiting for logs...</span>}
+                       {logs.map((log, i) => (
+                         <div key={i} className="text-slate-300 border-b border-slate-900/50 pb-0.5 last:border-0">
+                           {log}
+                         </div>
+                       ))}
+                    </div>
+
+                    <div className="flex gap-4 justify-end pt-2">
+                      {job.status === 'RUNNING' && (
+                        <button 
+                          onClick={stopJob}
+                          className="text-red-400 hover:bg-red-500/10 px-4 py-2 rounded-md text-sm transition-colors border border-transparent hover:border-red-500/20"
+                        >
+                          Stop Operation
+                        </button>
+                      )}
+                      {job.status !== 'RUNNING' && (
+                         <button 
+                          onClick={() => setJob(prev => ({...prev, status: 'IDLE', progress: 0, processedCount: 0}))}
+                          className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm"
+                        >
+                          New Task
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -397,7 +528,7 @@ const App: React.FC = () => {
                         <h3 className="text-lg font-medium text-white">Step 2: Range & Filters</h3>
                         
                         <div>
-                          <label className="block text-xs text-slate-400 mb-2 uppercase font-bold tracking-wider">Last Message ID to Forward</label>
+                          <label className="block text-xs text-slate-400 mb-2 uppercase font-bold tracking-wider">Last Message ID (End)</label>
                           <div className="flex items-center gap-3">
                               <input 
                                 type="number" 
@@ -405,28 +536,24 @@ const App: React.FC = () => {
                                 placeholder="e.g. 5000"
                                 onChange={(e) => setJob(prev => ({...prev, lastMessageId: parseInt(e.target.value)}))}
                               />
-                              <div className="p-3 bg-slate-900 rounded-lg border border-slate-700">
-                                <span className="text-xs text-slate-500 block">Start ID</span>
-                                <span className="font-mono">1</span>
-                              </div>
                           </div>
                         </div>
 
                         <div className="bg-orange-500/5 border border-orange-500/20 p-4 rounded-xl">
                           <div className="flex justify-between items-center mb-3">
                             <label className="text-sm font-bold text-orange-400 flex items-center gap-2">
-                              <Type size={16} /> Skip Messages
+                              <Type size={16} /> Set Start Point
                             </label>
                           </div>
                           <p className="text-xs text-slate-400 mb-4">
-                            Select how many messages to skip from the queue.
+                            Enter the starting Message ID (positive) OR how many from the end to skip (negative).
                           </p>
-                          <div className="grid grid-cols-4 gap-3">
+                          <div className="grid grid-cols-4 gap-3 mb-4">
                               {[
-                                { label: '-100 (End)', val: -100 },
-                                { label: '300 (Start)', val: 300 },
-                                { label: '-10 (End)', val: -10 },
-                                { label: '10 (Start)', val: 10 }
+                                { label: 'Start from ID 300', val: 300 },
+                                { label: 'Last 100 Msgs', val: -100 },
+                                { label: 'Start from ID 10', val: 10 },
+                                { label: 'Last 10 Msgs', val: -10 }
                               ].map(opt => (
                                 <button 
                                   key={opt.val}
@@ -437,6 +564,13 @@ const App: React.FC = () => {
                                 </button>
                               ))}
                           </div>
+                          <input 
+                              type="number"
+                              value={job.skipCount}
+                              onChange={(e) => setJob(prev => ({...prev, skipCount: parseInt(e.target.value)}))}
+                              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm font-mono text-center"
+                              placeholder="Custom Value"
+                          />
                         </div>
 
                         <div className="flex justify-between pt-4 border-t border-slate-700">
