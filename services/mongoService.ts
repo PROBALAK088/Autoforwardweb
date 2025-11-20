@@ -57,13 +57,14 @@ const DEFAULT_CONFIG: AppConfig = {
 };
 
 // Config Management
-export const saveConfigToDB = async (config: AppConfig): Promise<boolean> => {
-  console.log(`[MongoDB] Connecting to Cluster0...`);
+export const saveConfigToDB = async (config: AppConfig, userId: string): Promise<boolean> => {
+  console.log(`[MongoDB] Connecting to Cluster0 for user ${userId}...`);
   
   await new Promise(resolve => setTimeout(resolve, 800)); // Simulate network latency
   
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    // Save to user-specific key
+    localStorage.setItem(`${STORAGE_KEY}_${userId}`, JSON.stringify(config));
     console.log('[MongoDB] Write Successful');
     return true;
   } catch (e) {
@@ -72,10 +73,11 @@ export const saveConfigToDB = async (config: AppConfig): Promise<boolean> => {
   }
 };
 
-export const loadConfigFromDB = async (): Promise<AppConfig> => {
+export const loadConfigFromDB = async (userId: string): Promise<AppConfig> => {
   await new Promise(resolve => setTimeout(resolve, 500));
   
-  const stored = localStorage.getItem(STORAGE_KEY);
+  // Load from user-specific key
+  const stored = localStorage.getItem(`${STORAGE_KEY}_${userId}`);
   if (stored) {
     const parsed = JSON.parse(stored);
     return { 

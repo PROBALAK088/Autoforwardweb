@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { Bot, CheckCircle, AlertCircle, RefreshCw, ExternalLink } from 'lucide-react';
+import { Bot, CheckCircle, AlertCircle, RefreshCw, ExternalLink, Rocket, Server } from 'lucide-react';
 import { BotConfig } from '../types';
 import { checkBotStatus } from '../services/telegramService';
 
@@ -46,8 +46,8 @@ export const BotConnection: React.FC<BotConnectionProps> = ({ config, onUpdate }
               <Bot size={24} className="text-white" />
             </div>
             <div>
-              <h2 className="text-xl font-bold text-white">Telegram Bot Connection</h2>
-              <p className="text-slate-400 text-sm">Connect your bot to enable auto-forwarding</p>
+              <h2 className="text-xl font-bold text-white">Telegram Bot Deployment</h2>
+              <p className="text-slate-400 text-sm">Connect and deploy your bot instance to the cloud.</p>
             </div>
           </div>
           
@@ -69,9 +69,23 @@ export const BotConnection: React.FC<BotConnectionProps> = ({ config, onUpdate }
               <button 
                 onClick={handleCheck}
                 disabled={checking || !config.token}
-                className="bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 text-white px-6 py-2 rounded-lg transition-all disabled:opacity-50 font-medium min-w-[100px] flex justify-center items-center"
+                className={`text-white px-6 py-2 rounded-lg transition-all disabled:opacity-50 font-medium min-w-[140px] flex justify-center items-center gap-2 shadow-lg ${
+                  config.isConnected 
+                    ? 'bg-green-600 hover:bg-green-500 shadow-green-500/20' 
+                    : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 shadow-blue-500/20'
+                }`}
               >
-                {checking ? <RefreshCw className="animate-spin" size={18} /> : 'Connect'}
+                {checking ? (
+                  <RefreshCw className="animate-spin" size={18} />
+                ) : config.isConnected ? (
+                  <>
+                    <CheckCircle size={18} /> Deployed
+                  </>
+                ) : (
+                  <>
+                    <Rocket size={18} /> Connect & Deploy
+                  </>
+                )}
               </button>
             </div>
             {error && (
@@ -84,19 +98,19 @@ export const BotConnection: React.FC<BotConnectionProps> = ({ config, onUpdate }
 
         <div className="bg-slate-950/50 p-5 rounded-xl border border-slate-700/50 w-full md:w-80">
           <div className="flex items-center justify-between mb-4">
-             <h3 className="text-sm font-medium text-slate-300">Connection Details</h3>
+             <h3 className="text-sm font-medium text-slate-300">Instance Status</h3>
              {config.isConnected && <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>}
           </div>
           
           <div className="space-y-3">
              <div className="flex items-center justify-between group">
-                <span className="text-sm text-slate-500">Status</span>
+                <span className="text-sm text-slate-500">Deployment</span>
                 {config.isConnected ? (
                   <span className="text-green-400 text-sm font-bold flex items-center gap-1 bg-green-400/10 px-2 py-0.5 rounded">
-                    <CheckCircle size={14} /> Online
+                    <CheckCircle size={14} /> Active
                   </span>
                 ) : (
-                  <span className="text-slate-400 text-sm bg-slate-800 px-2 py-0.5 rounded">Disconnected</span>
+                  <span className="text-slate-400 text-sm bg-slate-800 px-2 py-0.5 rounded">Inactive</span>
                 )}
              </div>
              
@@ -113,13 +127,15 @@ export const BotConnection: React.FC<BotConnectionProps> = ({ config, onUpdate }
                     </a>
                 </div>
                 <div className="flex items-center justify-between">
-                    <span className="text-sm text-slate-500">ID</span>
-                    <span className="text-slate-500 text-xs font-mono bg-slate-900 px-1 rounded">{config.id}</span>
+                    <span className="text-sm text-slate-500">Server</span>
+                    <span className="text-slate-400 text-xs font-mono flex items-center gap-1">
+                      <Server size={10}/> Cloud-01
+                    </span>
                 </div>
                </>
              ) : (
                <div className="py-6 text-center">
-                 <p className="text-xs text-slate-600">Enter a valid token to view bot details</p>
+                 <p className="text-xs text-slate-600">Deploy to view instance details</p>
                </div>
              )}
           </div>

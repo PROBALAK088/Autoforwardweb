@@ -22,7 +22,8 @@ import {
   Terminal,
   Check,
   XCircle,
-  Clock
+  Clock,
+  Rocket
 } from 'lucide-react';
 import { Toggle } from './components/Toggle';
 import { SectionHeader } from './components/SectionHeader';
@@ -31,7 +32,7 @@ import { BotCommands } from './components/BotCommands';
 import { AdvancedSettings } from './components/AdvancedSettings';
 import { Auth } from './components/Auth';
 import { saveConfigToDB, loadConfigFromDB, testDatabaseConnection, getCurrentUser, logoutUser } from './services/mongoService';
-import { verifyBotAdmin, copyMessage } from './services/telegramService';
+import { verifyBotAdmin, copyMessage, getMessage } from './services/telegramService';
 import { processCaption } from './services/captionService';
 import { AppConfig, ChannelType, ForwardJob, User } from './types';
 
@@ -72,7 +73,8 @@ const App: React.FC = () => {
     const user = getCurrentUser();
     if (user) {
       setCurrentUser(user);
-      loadConfigFromDB().then((data) => {
+      // Pass User ID to load specific config
+      loadConfigFromDB(user.telegramId).then((data) => {
         setConfig(data);
         setLoading(false);
       });
@@ -91,7 +93,8 @@ const App: React.FC = () => {
   const handleLogin = (user: User) => {
     setCurrentUser(user);
     setLoading(true);
-    loadConfigFromDB().then((data) => {
+    // Pass User ID to load specific config
+    loadConfigFromDB(user.telegramId).then((data) => {
       setConfig(data);
       setLoading(false);
     });
@@ -104,9 +107,10 @@ const App: React.FC = () => {
   };
 
   const handleSave = async () => {
-    if (!config) return;
+    if (!config || !currentUser) return;
     setLoading(true);
-    await saveConfigToDB(config);
+    // Pass User ID to save to specific slot
+    await saveConfigToDB(config, currentUser.telegramId);
     setLoading(false);
   };
 
@@ -251,12 +255,25 @@ const App: React.FC = () => {
         }
 
         try {
-          let finalCaption = undefined;
+          // 1. Get Original Message to process caption
+          const originalMsg = await getMessage(job.sourceId, msgId, config.bot.token);
           
-          if (config.captionRules.template || config.captionRules.prefix || config.captionRules.suffix) {
-             finalCaption = processCaption("", `file_${msgId}`, 0, config.captionRules);
+          // 2. Prepare Caption
+          let finalCaption = undefined;
+          if (originalMsg && (config.captionRules.template || config.captionRules.prefix || config.captionRules.suffix || config.captionRules.replacements.length > 0)) {
+             // Extract basic file info if available
+             let filename = "";
+             let filesize = 0;
+             
+             if (originalMsg.video) { filename = originalMsg.video.file_name || "video"; filesize = originalMsg.video.file_size || 0; }
+             else if (originalMsg.document) { filename = originalMsg.document.file_name || "doc"; filesize = originalMsg.document.file_size || 0; }
+             else if (originalMsg.audio) { filename = originalMsg.audio.file_name || "audio"; filesize = originalMsg.audio.file_size || 0; }
+
+             // Process Caption
+             finalCaption = processCaption(originalMsg.caption || originalMsg.text || "", filename, filesize, config.captionRules);
           }
 
+          // 3. Copy Message
           const result = await copyMessage(
             job.destinationId, 
             job.sourceId, 
@@ -280,7 +297,7 @@ const App: React.FC = () => {
             // If message not found or empty, it's safe to skip
             if (errorLower.includes('message to copy not found') || errorLower.includes('message is empty') || result.errorCode === 400) {
                addLog(`⏩ Skipped ${msgId} (Not found/Empty)`, 'info');
-               consecutiveErrors = 0; // Don't pause for missing messages
+               consecutiveErrors = 0; 
             } else {
                addLog(`⚠️ Error on ${msgId}: ${result.error}`, 'error');
                consecutiveErrors++;
@@ -291,7 +308,7 @@ const App: React.FC = () => {
           consecutiveErrors++;
         }
 
-        // Safety break if too many REAL errors (not just skips)
+        // Safety break if too many REAL errors
         if (consecutiveErrors > 20) {
           addLog("⚠️ Too many connection errors. Pausing job to protect bot.", 'error');
           abortRef.current = true;
@@ -455,414 +472,344 @@ const App: React.FC = () => {
                        <div ref={logsEndRef} />
                     </div>
 
-                    <div className="flex gap-4 justify-end pt-2">
-                      {job.status === 'RUNNING' && (
-                        <button 
-                          onClick={stopJob}
-                          className="text-red-400 hover:bg-red-500/10 px-4 py-2 rounded-md text-sm transition-colors border border-red-500/20 hover:border-red-500/40 flex items-center gap-2"
-                        >
-                          <XCircle size={16} /> Stop Operation
-                        </button>
-                      )}
-                      {job.status !== 'RUNNING' && (
-                         <button 
-                          onClick={() => setJob(prev => ({...prev, status: 'IDLE', progress: 0, processedCount: 0}))}
-                          className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2"
-                        >
-                          <Plus size={16} /> New Task
-                        </button>
-                      )}
+                    <div className="flex justify-end">
+                       <button 
+                         onClick={stopJob}
+                         className="bg-red-500/20 hover:bg-red-500/30 text-red-400 px-4 py-2 rounded-lg border border-red-500/30 flex items-center gap-2 transition-all"
+                       >
+                         <XCircle size={18} /> Stop Operation
+                       </button>
                     </div>
                   </div>
                 )}
 
-                {showJobWizard && job.status === 'IDLE' && (
-                  <div className="space-y-6 bg-slate-800/40 p-6 rounded-xl border border-slate-700/50 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                    
-                    {wizardStep === 1 && (
-                      <div className="space-y-4">
-                        <h3 className="text-lg font-medium text-white">Step 1: Select Channels</h3>
-                        <div className="grid md:grid-cols-2 gap-4">
-                          <div>
-                            <label className="block text-xs text-slate-400 mb-1 uppercase font-bold tracking-wider">Source</label>
-                            <div className="grid gap-2 max-h-40 overflow-y-auto custom-scrollbar">
-                              {config.channels.filter(c => c.type === ChannelType.SOURCE).map(c => (
-                                <button
-                                  key={c.id}
-                                  onClick={() => setJob(prev => ({...prev, sourceId: c.id}))}
-                                  className={`text-left p-3 rounded-lg border transition-all ${job.sourceId === c.id ? 'bg-telegram-primary/20 border-telegram-primary ring-1 ring-telegram-primary' : 'bg-slate-900/50 border-slate-600 hover:bg-slate-800'}`}
-                                >
-                                  <div className="text-sm font-medium">{c.name}</div>
-                                  <div className="text-xs text-slate-500">{c.id}</div>
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                          <div>
-                            <label className="block text-xs text-slate-400 mb-1 uppercase font-bold tracking-wider">Destination</label>
-                            <div className="grid gap-2 max-h-40 overflow-y-auto custom-scrollbar">
-                              {config.channels.filter(c => c.type === ChannelType.DESTINATION).map(c => (
-                                <button
-                                  key={c.id}
-                                  onClick={() => setJob(prev => ({...prev, destinationId: c.id}))}
-                                  className={`text-left p-3 rounded-lg border transition-all ${job.destinationId === c.id ? 'bg-purple-500/20 border-purple-500 ring-1 ring-purple-500' : 'bg-slate-900/50 border-slate-600 hover:bg-slate-800'}`}
-                                >
-                                  <div className="text-sm font-medium">{c.name}</div>
-                                  <div className="text-xs text-slate-500">{c.id}</div>
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex justify-end gap-2 pt-4">
-                          <button onClick={() => setShowJobWizard(false)} className="px-4 py-2 text-slate-400 hover:text-white transition-colors">Cancel</button>
-                          <button 
-                            disabled={!job.sourceId || !job.destinationId}
-                            onClick={() => setWizardStep(2)} 
-                            className="bg-telegram-primary hover:bg-blue-500 text-white px-6 py-2 rounded-lg disabled:opacity-50 transition-all shadow-lg shadow-blue-500/20"
-                          >
-                            Next: Configure Range
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                {/* JOB WIZARD */}
+                {showJobWizard && (
+                  <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700/50 animate-fade-in">
+                     <div className="flex items-center gap-2 mb-6 text-telegram-primary">
+                        <span className="bg-telegram-primary/20 w-8 h-8 rounded-full flex items-center justify-center font-bold border border-telegram-primary/30">{wizardStep}</span>
+                        <h3 className="text-lg font-bold text-white">
+                          {wizardStep === 1 && "Select Channels"}
+                          {wizardStep === 2 && "Configure Range"}
+                          {wizardStep === 3 && "Review & Start"}
+                        </h3>
+                     </div>
 
-                    {wizardStep === 2 && (
-                      <div className="space-y-6">
-                        <h3 className="text-lg font-medium text-white">Step 2: Range & Filters</h3>
-                        
-                        <div>
-                          <label className="block text-xs text-slate-400 mb-2 uppercase font-bold tracking-wider">Last Message ID (End)</label>
-                          <div className="flex items-center gap-3">
-                              <input 
-                                type="number" 
-                                className="flex-1 bg-slate-950/80 border border-slate-600 rounded-lg p-3 text-lg font-mono focus:border-telegram-primary outline-none text-white"
-                                placeholder="e.g. 5000"
-                                onChange={(e) => setJob(prev => ({...prev, lastMessageId: parseInt(e.target.value)}))}
-                              />
+                     {wizardStep === 1 && (
+                       <div className="space-y-4">
+                          <div className="grid md:grid-cols-2 gap-4">
+                             <div>
+                                <label className="block text-sm text-slate-400 mb-2">Source Channel</label>
+                                <select 
+                                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 outline-none focus:border-telegram-primary"
+                                  value={job.sourceId}
+                                  onChange={e => setJob({...job, sourceId: e.target.value})}
+                                >
+                                  <option value="">Select Source...</option>
+                                  {config.channels.filter(c => c.type === ChannelType.SOURCE).map(c => (
+                                    <option key={c.id} value={c.id}>{c.name} ({c.id})</option>
+                                  ))}
+                                </select>
+                             </div>
+                             <div>
+                                <label className="block text-sm text-slate-400 mb-2">Target Channel</label>
+                                <select 
+                                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 outline-none focus:border-telegram-primary"
+                                  value={job.destinationId}
+                                  onChange={e => setJob({...job, destinationId: e.target.value})}
+                                >
+                                  <option value="">Select Target...</option>
+                                  {config.channels.filter(c => c.type === ChannelType.DESTINATION).map(c => (
+                                    <option key={c.id} value={c.id}>{c.name} ({c.id})</option>
+                                  ))}
+                                </select>
+                             </div>
                           </div>
-                        </div>
+                          <div className="flex justify-end gap-3 mt-4">
+                             <button onClick={() => setShowJobWizard(false)} className="px-4 py-2 text-slate-400 hover:text-white">Cancel</button>
+                             <button 
+                               disabled={!job.sourceId || !job.destinationId}
+                               onClick={() => setWizardStep(2)}
+                               className="bg-telegram-primary text-white px-6 py-2 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                             >
+                               Next
+                             </button>
+                          </div>
+                       </div>
+                     )}
 
-                        <div className="bg-orange-500/5 border border-orange-500/20 p-4 rounded-xl">
-                          <div className="flex justify-between items-center mb-3">
-                            <label className="text-sm font-bold text-orange-400 flex items-center gap-2">
-                              <Type size={16} /> Set Start Point
-                            </label>
+                     {wizardStep === 2 && (
+                       <div className="space-y-4">
+                          <div>
+                             <label className="block text-sm text-slate-400 mb-2">Last Message ID in Source</label>
+                             <input 
+                               type="number" 
+                               value={job.lastMessageId}
+                               onChange={e => setJob({...job, lastMessageId: parseInt(e.target.value) || 0})}
+                               className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3"
+                               placeholder="e.g. 1050"
+                             />
+                             <p className="text-xs text-slate-500 mt-1">Go to source channel, right click latest post {'>'} Copy Link {'>'} Last number is ID</p>
                           </div>
-                          <p className="text-xs text-slate-400 mb-4">
-                            Enter the starting Message ID (positive) OR how many from the end to skip (negative).
+
+                          <div>
+                             <label className="block text-sm text-slate-400 mb-2">Skip Messages</label>
+                             <div className="flex gap-2 mb-2">
+                                <button onClick={() => setJob({...job, skipCount: 100})} className="bg-slate-700 px-3 py-1 rounded text-xs">+100 Start</button>
+                                <button onClick={() => setJob({...job, skipCount: -100})} className="bg-slate-700 px-3 py-1 rounded text-xs">-100 End</button>
+                             </div>
+                             <input 
+                               type="number" 
+                               value={job.skipCount}
+                               onChange={e => setJob({...job, skipCount: parseInt(e.target.value) || 0})}
+                               className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3"
+                             />
+                             <p className="text-xs text-slate-500 mt-1">Positive: Start from ID X. Negative: Skip last X messages.</p>
+                          </div>
+
+                          <div className="flex justify-end gap-3 mt-4">
+                             <button onClick={() => setWizardStep(1)} className="px-4 py-2 text-slate-400 hover:text-white">Back</button>
+                             <button 
+                               disabled={job.lastMessageId <= 0}
+                               onClick={() => setWizardStep(3)}
+                               className="bg-telegram-primary text-white px-6 py-2 rounded-lg disabled:opacity-50"
+                             >
+                               Next
+                             </button>
+                          </div>
+                       </div>
+                     )}
+
+                     {wizardStep === 3 && (
+                       <div className="space-y-4 text-center py-4">
+                          <div className="mx-auto w-16 h-16 bg-telegram-primary/10 rounded-full flex items-center justify-center mb-4">
+                             <Rocket size={32} className="text-telegram-primary" />
+                          </div>
+                          <h4 className="text-xl font-bold text-white">Ready to Launch</h4>
+                          <p className="text-slate-400 max-w-md mx-auto">
+                            Will forward approximately <b>{job.lastMessageId - (job.skipCount > 0 ? job.skipCount : 1)}</b> messages from source to destination.
                           </p>
-                          <div className="grid grid-cols-4 gap-3 mb-4">
-                              {[
-                                { label: 'Start 300', val: 300 },
-                                { label: 'Last 100', val: -100 },
-                                { label: 'Start 10', val: 10 },
-                                { label: 'Last 10', val: -10 }
-                              ].map(opt => (
-                                <button 
-                                  key={opt.val}
-                                  onClick={() => setJob(prev => ({...prev, skipCount: opt.val}))}
-                                  className={`px-2 py-2 text-xs font-medium rounded-lg border transition-all ${job.skipCount === opt.val ? 'bg-orange-500 text-white border-orange-500 shadow-lg shadow-orange-500/20' : 'bg-slate-900 border-slate-600 text-slate-400 hover:bg-slate-800'}`}
-                                >
-                                  {opt.label}
-                                </button>
-                              ))}
+                          
+                          <div className="flex justify-center gap-3 mt-6">
+                             <button onClick={() => setWizardStep(2)} className="px-4 py-2 text-slate-400 hover:text-white">Back</button>
+                             <button 
+                               onClick={() => {
+                                 setShowJobWizard(false);
+                                 startForwarding();
+                               }}
+                               className="bg-green-600 hover:bg-green-500 text-white px-8 py-3 rounded-xl font-bold shadow-lg shadow-green-500/20 transition-transform active:scale-95 flex items-center gap-2"
+                             >
+                               <Play size={20} fill="currentColor" /> Start Forwarding
+                             </button>
                           </div>
-                          <input 
-                              type="number"
-                              value={job.skipCount}
-                              onChange={(e) => setJob(prev => ({...prev, skipCount: parseInt(e.target.value)}))}
-                              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm font-mono text-center text-white"
-                              placeholder="Custom Start Value"
-                          />
-                        </div>
-
-                        <div className="flex justify-between pt-4 border-t border-slate-700">
-                          <button onClick={() => setWizardStep(1)} className="text-slate-400 hover:text-white transition-colors">Back</button>
-                          <button 
-                            disabled={!job.lastMessageId}
-                            onClick={() => { setShowJobWizard(false); startForwarding(); }}
-                            className="bg-green-600 hover:bg-green-500 text-white px-8 py-2 rounded-lg font-bold flex items-center gap-2 shadow-lg shadow-green-600/20 disabled:opacity-50 disabled:shadow-none transition-all"
-                          >
-                            Start Forwarding <Send size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
+                       </div>
+                     )}
                   </div>
                 )}
+
               </div>
             </section>
+            
+            <div className="mt-8">
+               <AdvancedSettings 
+                 config={config.captionRules} 
+                 onChange={(newRules) => updateConfig(prev => ({ ...prev, captionRules: newRules }))} 
+               />
+            </div>
+
           </div>
 
+          {/* RIGHT COLUMN: SETTINGS */}
           <div className="space-y-6">
-             <BotCommands />
-
-             <section className="glass-panel rounded-2xl p-6 shadow-xl">
-              <SectionHeader 
-                title="Channel Manager" 
-                icon={Link2} 
-                description="Connect source/target channels."
-              />
-              
-              <div className="space-y-4">
-                <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
-                  <div className="space-y-3">
-                    {!config.bot.isConnected && (
-                      <div className="bg-yellow-500/10 border border-yellow-500/20 p-2 rounded text-xs text-yellow-200 flex gap-2 items-center">
-                        <AlertCircle size={12} /> Bot required
+            
+            {/* CHANNELS CARD */}
+            <div className="glass-panel p-6 rounded-xl shadow-lg">
+              <SectionHeader title="Connected Channels" icon={Link2} />
+              <div className="space-y-4 mb-6">
+                {config.channels.length === 0 && (
+                  <div className="text-center py-8 border-2 border-dashed border-slate-700 rounded-xl">
+                     <p className="text-slate-500">No channels connected</p>
+                  </div>
+                )}
+                {config.channels.map(channel => (
+                  <div key={channel.id} className="bg-slate-900/50 p-3 rounded-lg flex items-center justify-between group border border-slate-800/50 hover:border-slate-700 transition-colors">
+                    <div>
+                      <p className="font-medium text-sm text-slate-200">{channel.name}</p>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-500 font-mono">{channel.id}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                          channel.type === ChannelType.SOURCE 
+                            ? 'border-blue-500/30 text-blue-400 bg-blue-500/10' 
+                            : 'border-purple-500/30 text-purple-400 bg-purple-500/10'
+                        }`}>
+                          {channel.type}
+                        </span>
                       </div>
-                    )}
-                    
+                    </div>
+                    <button onClick={() => removeChannel(channel.id)} className="text-slate-600 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100 p-2">
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700/50">
+                 <label className="text-xs text-slate-400 font-bold uppercase tracking-wider mb-3 block">Connect New Channel</label>
+                 <div className="space-y-3">
                     <input
                       type="text"
                       value={newChannelId}
-                      disabled={!config.bot.isConnected}
-                      onChange={(e) => setNewChannelId(e.target.value)}
-                      placeholder="-100xxxxxxxxxx"
-                      className="w-full bg-slate-950 border border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:border-telegram-primary outline-none disabled:opacity-50 font-mono text-center tracking-wide text-white"
+                      onChange={e => setNewChannelId(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm font-mono placeholder-slate-600 focus:border-telegram-primary outline-none"
+                      placeholder="-100..."
                     />
-                    
                     <div className="flex gap-2">
-                      <button 
-                        onClick={() => setNewChannelType(ChannelType.SOURCE)}
-                        className={`flex-1 py-2 text-xs font-medium rounded-lg border transition-all ${newChannelType === ChannelType.SOURCE ? 'bg-blue-500/20 border-blue-500 text-blue-400' : 'border-slate-600 text-slate-500 hover:bg-slate-700'}`}
-                      >
-                        Source
-                      </button>
-                      <button 
-                        onClick={() => setNewChannelType(ChannelType.DESTINATION)}
-                        className={`flex-1 py-2 text-xs font-medium rounded-lg border transition-all ${newChannelType === ChannelType.DESTINATION ? 'bg-purple-500/20 border-purple-500 text-purple-400' : 'border-slate-600 text-slate-500 hover:bg-slate-700'}`}
-                      >
-                        Target
-                      </button>
+                       <select
+                         value={newChannelType}
+                         onChange={e => setNewChannelType(e.target.value as ChannelType)}
+                         className="bg-slate-950 border border-slate-700 rounded px-2 text-sm text-slate-300 outline-none"
+                       >
+                         <option value={ChannelType.SOURCE}>Source</option>
+                         <option value={ChannelType.DESTINATION}>Target</option>
+                       </select>
+                       <button 
+                         onClick={addChannel}
+                         disabled={!newChannelId || verifyingChannel}
+                         className="flex-1 bg-telegram-surface hover:bg-slate-700 border border-slate-600 text-white py-2 rounded text-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                       >
+                         {verifyingChannel ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"/> : <Plus size={16} />}
+                         Add
+                       </button>
                     </div>
-
-                    <button 
-                      onClick={addChannel}
-                      disabled={!config.bot.isConnected || !newChannelId || verifyingChannel}
-                      className="w-full bg-telegram-primary hover:bg-blue-600 disabled:bg-slate-700 disabled:text-slate-500 text-white py-2 rounded-lg font-medium transition-all flex justify-center items-center gap-2 text-sm shadow-lg shadow-blue-500/20"
-                    >
-                      {verifyingChannel ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"/> : 'Add Channel'}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="space-y-2 max-h-[200px] overflow-y-auto pr-1 custom-scrollbar">
-                  {config.channels.length === 0 && (
-                    <p className="text-center text-slate-500 text-xs py-4 italic">No channels connected</p>
-                  )}
-                  {config.channels.map(channel => (
-                    <div key={channel.id} className="flex items-center justify-between bg-slate-800/80 p-3 rounded-lg border border-slate-700/50 hover:bg-slate-800 transition-colors">
-                      <div className="flex items-center gap-3 overflow-hidden">
-                        <div className={`w-8 h-8 shrink-0 rounded-md flex items-center justify-center text-xs font-bold border ${channel.type === ChannelType.SOURCE ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' : 'bg-purple-500/10 text-purple-400 border-purple-500/30'}`}>
-                          {channel.type === ChannelType.SOURCE ? "SRC" : "TGT"}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="font-medium text-xs text-slate-200 truncate">{channel.name}</p>
-                          <p className="text-[10px] text-slate-500 font-mono truncate">{channel.id}</p>
-                        </div>
-                      </div>
-                      <button onClick={() => removeChannel(channel.id)} className="text-slate-600 hover:text-red-400 p-1.5 transition-colors">
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </section>
-          </div>
-        </div>
-
-        <section className="glass-panel rounded-2xl p-1 shadow-xl">
-          <div className="p-6 pb-2">
-            <SectionHeader title="Advanced Caption Editor" icon={FileText} description="Configure templates, replacements, and metadata extraction." />
-          </div>
-          <AdvancedSettings 
-            config={config.captionRules} 
-            onChange={(newRules) => updateConfig(prev => ({ ...prev, captionRules: newRules }))} 
-          />
-        </section>
-
-        <div className="grid md:grid-cols-2 gap-8">
-          <section className="glass-panel rounded-2xl p-6 shadow-xl h-full">
-            <SectionHeader title="Content Filters" icon={Settings} description="Toggle specific message types." />
-            <div className="space-y-1">
-              <Toggle 
-                label="Videos" 
-                checked={config.filters.video} 
-                onChange={(v) => updateConfig(prev => ({...prev, filters: {...prev.filters, video: v}}))} 
-              />
-              <Toggle 
-                label="Documents / Files" 
-                checked={config.filters.document} 
-                onChange={(v) => updateConfig(prev => ({...prev, filters: {...prev.filters, document: v}}))} 
-              />
-              <Toggle 
-                label="Text Messages" 
-                checked={config.filters.text} 
-                onChange={(v) => updateConfig(prev => ({...prev, filters: {...prev.filters, text: v}}))} 
-              />
-              <Toggle 
-                label="Photos" 
-                checked={config.filters.photos} 
-                onChange={(v) => updateConfig(prev => ({...prev, filters: {...prev.filters, photos: v}}))} 
-              />
-              <Toggle 
-                label="Stickers" 
-                checked={config.filters.stickers} 
-                onChange={(v) => updateConfig(prev => ({...prev, filters: {...prev.filters, stickers: v}}))} 
-              />
-              <Toggle 
-                label="Voice Messages" 
-                checked={config.filters.voice} 
-                onChange={(v) => updateConfig(prev => ({...prev, filters: {...prev.filters, voice: v}}))} 
-              />
-            </div>
-          </section>
-
-          <section className="glass-panel rounded-2xl p-6 shadow-xl flex flex-col">
-             <SectionHeader title="File Size Limits" icon={HardDrive} description="Control bandwidth usage by limiting file sizes." />
-             <div className="flex-1 flex flex-col justify-center space-y-8 mt-2">
-                <div className="relative pt-6">
-                  <label className="absolute top-0 left-0 text-sm font-medium text-slate-400">Min Size</label>
-                  <div className="flex items-center gap-4">
-                    <input 
-                      type="range" 
-                      min="0" 
-                      max="500" 
-                      value={config.sizeLimits.min}
-                      onChange={(e) => updateConfig(prev => ({...prev, sizeLimits: {...prev.sizeLimits, min: parseInt(e.target.value)}}))}
-                      className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-telegram-primary hover:accent-blue-400"
-                    />
-                    <div className="w-20 text-right font-mono text-telegram-primary font-bold">{config.sizeLimits.min} MB</div>
-                  </div>
-                </div>
-                
-                <div className="relative pt-6">
-                  <label className="absolute top-0 left-0 text-sm font-medium text-slate-400">Max Size</label>
-                  <div className="flex items-center gap-4">
-                    <input 
-                      type="range" 
-                      min="1" 
-                      max="4000" 
-                      value={config.sizeLimits.max}
-                      onChange={(e) => updateConfig(prev => ({...prev, sizeLimits: {...prev.sizeLimits, max: parseInt(e.target.value)}}))}
-                      className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-telegram-primary hover:accent-blue-400"
-                    />
-                    <div className="w-20 text-right font-mono text-telegram-primary font-bold">{config.sizeLimits.max} MB</div>
-                  </div>
-                </div>
-
-                <div className="bg-blue-900/20 border border-blue-500/20 p-4 rounded-lg flex gap-3">
-                  <AlertCircle className="text-blue-400 shrink-0" size={20} />
-                  <div className="space-y-1">
-                     <p className="text-sm font-medium text-blue-200">Limit Adjustment</p>
-                     <p className="text-xs text-blue-300/70">Files smaller than Min or larger than Max will be skipped automatically during the forwarding process.</p>
-                  </div>
-                </div>
-             </div>
-          </section>
-        </div>
-
-        <section className="glass-panel rounded-2xl p-6 shadow-xl">
-          <SectionHeader title="Quick Filters & Blacklist" icon={Scissors} description="Sanitize message text and block content." />
-          
-          <div className="grid lg:grid-cols-3 gap-8 mt-6">
-            <div className="space-y-4">
-               <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-2">Remove Words</h3>
-               <div className="bg-slate-800/80 p-4 rounded-xl border border-slate-700/50">
-                <div className="flex gap-2 mb-4">
-                  <input 
-                    type="text"
-                    value={newWord}
-                    onChange={(e) => setNewWord(e.target.value)}
-                    placeholder="e.g. @spam_channel"
-                    className="flex-1 bg-slate-950 border border-slate-600 rounded-lg px-4 py-2.5 text-sm focus:border-telegram-primary outline-none text-white"
-                    onKeyDown={(e) => e.key === 'Enter' && addRemoveWord()}
-                  />
-                  <button onClick={addRemoveWord} className="bg-slate-700 hover:bg-slate-600 text-white px-4 rounded-lg transition-colors">Add</button>
-                </div>
-                <div className="flex flex-wrap gap-2 min-h-[80px]">
-                  {config.captionRules.removeWords.map(word => (
-                    <span key={word} className="inline-flex items-center gap-1 bg-blue-500/10 text-blue-400 border border-blue-500/20 px-3 py-1.5 rounded-full text-sm">
-                      {word}
-                      <button onClick={() => deleteRemoveWord(word)} className="hover:text-white transition-colors ml-1"><Trash2 size={12} /></button>
-                    </span>
-                  ))}
-                </div>
+                 </div>
               </div>
             </div>
+            
+            <BotCommands />
 
-            <div className="space-y-4">
-              <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-2 flex items-center gap-2"><ShieldAlert size={14}/> Blacklist Phrases</h3>
-              <div className="bg-red-900/10 p-4 rounded-xl border border-red-500/20">
-                <div className="flex gap-2 mb-4">
-                  <input 
+            {/* BLACKLIST CARD */}
+            <div className="glass-panel p-6 rounded-xl shadow-lg">
+               <SectionHeader title="Blacklist" icon={ShieldAlert} description="Skip files containing these words." />
+               <div className="flex gap-2 mb-4">
+                 <input 
                     type="text"
                     value={newBlacklistPhrase}
-                    onChange={(e) => setNewBlacklistPhrase(e.target.value)}
-                    placeholder="Skip message if contains..."
-                    className="flex-1 bg-slate-950 border border-red-900/40 rounded-lg px-4 py-2.5 text-sm focus:border-red-500 outline-none text-white"
-                    onKeyDown={(e) => e.key === 'Enter' && addBlacklistPhrase()}
-                  />
-                  <button onClick={addBlacklistPhrase} className="bg-red-900/40 hover:bg-red-800/40 text-red-200 px-4 rounded-lg transition-colors">Add</button>
-                </div>
-                <div className="flex flex-wrap gap-2 min-h-[80px]">
+                    onChange={e => setNewBlacklistPhrase(e.target.value)}
+                    className="flex-1 bg-slate-900/80 border border-slate-700 rounded px-3 py-2 text-sm placeholder-slate-600 outline-none focus:border-red-500"
+                    placeholder="e.g. casino"
+                    onKeyDown={e => e.key === 'Enter' && addBlacklistPhrase()}
+                 />
+                 <button onClick={addBlacklistPhrase} className="bg-slate-800 hover:bg-slate-700 text-slate-300 p-2 rounded border border-slate-600">
+                    <Plus size={18} />
+                 </button>
+               </div>
+               <div className="flex flex-wrap gap-2">
                   {config.blacklistPhrases.map(phrase => (
-                    <span key={phrase} className="inline-flex items-center gap-1 bg-red-500/10 text-red-400 border border-red-500/20 px-3 py-1.5 rounded-full text-sm">
-                      {phrase}
-                      <button onClick={() => deleteBlacklistPhrase(phrase)} className="hover:text-white transition-colors ml-1"><Trash2 size={12} /></button>
+                    <span key={phrase} className="bg-red-500/10 text-red-400 border border-red-500/20 px-3 py-1 rounded-full text-xs flex items-center gap-1 group cursor-default">
+                       {phrase}
+                       <button onClick={() => deleteBlacklistPhrase(phrase)} className="text-red-500/50 group-hover:text-red-500"><Trash2 size={12}/></button>
                     </span>
                   ))}
-                </div>
-              </div>
+                  {config.blacklistPhrases.length === 0 && <span className="text-slate-600 text-xs italic">No blacklist phrases active.</span>}
+               </div>
             </div>
 
-            <div className="space-y-1 border-l border-slate-700/50 pl-0 lg:pl-6">
-              <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-4">Basic Toggles</h3>
-              <Toggle 
-                label="Remove Links" 
-                checked={config.captionRules.removeLinks} 
-                onChange={(v) => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, removeLinks: v}}))} 
-                description="Strips http/https/t.me"
-              />
-              <Toggle 
-                label="Remove Usernames" 
-                checked={config.captionRules.removeUsernames} 
-                onChange={(v) => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, removeUsernames: v}}))} 
-                description="Removes @mentions"
-              />
-              <Toggle 
-                label="Remove Emojis" 
-                checked={config.captionRules.removeEmojis} 
-                onChange={(v) => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, removeEmojis: v}}))} 
-                description="Cleans all unicode emojis"
-              />
-              <Toggle 
-                label="Single Line Spacing" 
-                checked={config.captionRules.singleLineSpace} 
-                onChange={(v) => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, singleLineSpace: v}}))} 
-                description="Collapses multiple empty lines"
-              />
-              <Toggle 
-                label="Fix Extension" 
-                checked={config.captionRules.fixExtension} 
-                onChange={(v) => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, fixExtension: v}}))} 
-                description="Ensures filename has correct ext"
-              />
+            {/* REMOVE WORDS CARD */}
+            <div className="glass-panel p-6 rounded-xl shadow-lg">
+               <SectionHeader title="Remove Words" icon={Scissors} description="Strip these words from captions." />
+               <div className="flex gap-2 mb-4">
+                 <input 
+                    type="text"
+                    value={newWord}
+                    onChange={e => setNewWord(e.target.value)}
+                    className="flex-1 bg-slate-900/80 border border-slate-700 rounded px-3 py-2 text-sm placeholder-slate-600 outline-none focus:border-yellow-500"
+                    placeholder="e.g. Join Now"
+                    onKeyDown={e => e.key === 'Enter' && addRemoveWord()}
+                 />
+                 <button onClick={addRemoveWord} className="bg-slate-800 hover:bg-slate-700 text-slate-300 p-2 rounded border border-slate-600">
+                    <Plus size={18} />
+                 </button>
+               </div>
+               <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto custom-scrollbar">
+                  {config.captionRules.removeWords.map(word => (
+                    <span key={word} className="bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 px-3 py-1 rounded-full text-xs flex items-center gap-1 group cursor-default">
+                       {word}
+                       <button onClick={() => deleteRemoveWord(word)} className="text-yellow-500/50 group-hover:text-yellow-500"><Trash2 size={12}/></button>
+                    </span>
+                  ))}
+               </div>
             </div>
+
+            {/* TOGGLES CARD */}
+            <div className="glass-panel p-6 rounded-xl shadow-lg">
+               <SectionHeader title="Global Filters" icon={Settings} />
+               <div className="space-y-0.5">
+                  <Toggle 
+                    label="Remove Links" 
+                    checked={config.captionRules.removeLinks} 
+                    onChange={v => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, removeLinks: v}}))}
+                  />
+                  <Toggle 
+                    label="Remove Usernames" 
+                    checked={config.captionRules.removeUsernames} 
+                    onChange={v => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, removeUsernames: v}}))}
+                  />
+                  <Toggle 
+                    label="Remove Emojis" 
+                    checked={config.captionRules.removeEmojis} 
+                    onChange={v => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, removeEmojis: v}}))}
+                  />
+                  <Toggle 
+                    label="Single Line Spacing" 
+                    checked={config.captionRules.singleLineSpace} 
+                    onChange={v => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, singleLineSpace: v}}))}
+                  />
+                  <Toggle 
+                    label="Fix Extensions" 
+                    checked={config.captionRules.fixExtension} 
+                    description="Ensure video files have extensions"
+                    onChange={v => updateConfig(prev => ({...prev, captionRules: {...prev.captionRules, fixExtension: v}}))}
+                  />
+               </div>
+            </div>
+
+            {/* SIZE LIMITS */}
+            <div className="glass-panel p-6 rounded-xl shadow-lg">
+               <SectionHeader title="Size Limits" icon={HardDrive} description="Skip files outside range (MB)" />
+               <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs text-slate-500 mb-1 block">Min (MB)</label>
+                    <input 
+                      type="number"
+                      value={config.sizeLimits.min}
+                      onChange={e => updateConfig(prev => ({...prev, sizeLimits: {...prev.sizeLimits, min: parseInt(e.target.value) || 0}}))}
+                      className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-center"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 mb-1 block">Max (MB)</label>
+                    <input 
+                      type="number"
+                      value={config.sizeLimits.max}
+                      onChange={e => updateConfig(prev => ({...prev, sizeLimits: {...prev.sizeLimits, max: parseInt(e.target.value) || 0}}))}
+                      className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-center"
+                    />
+                  </div>
+               </div>
+            </div>
+
           </div>
-        </section>
-      </main>
-      
-      <div className="fixed bottom-4 right-6 z-50 pointer-events-none">
-        <div className="glass-panel px-4 py-2 rounded-full flex items-center gap-2 shadow-lg border-telegram-primary/30">
-           <div className="w-2 h-2 bg-telegram-accent rounded-full animate-pulse shadow-[0_0_8px_#00dcff]"></div>
-           <span className="text-xs font-mono text-blue-200 font-bold tracking-wide drop-shadow-md">Telegram @SteveBotz</span>
         </div>
+      </main>
+
+      {/* WATERMARK */}
+      <div className="fixed bottom-6 right-6 z-50 pointer-events-none select-none opacity-50 hover:opacity-100 transition-opacity">
+         <div className="glass-panel px-4 py-2 rounded-full flex items-center gap-2 shadow-lg">
+            <div className="w-2 h-2 bg-telegram-accent rounded-full animate-pulse"></div>
+            <span className="text-xs font-mono text-slate-300 font-bold">Telegram @SteveBotz</span>
+         </div>
       </div>
+
     </div>
   );
 };
